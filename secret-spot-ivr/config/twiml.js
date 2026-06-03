@@ -8,10 +8,24 @@ function twiml(content) {
 }
 
 /**
- * <Say> with optional voice
+ * <Say> with optional voice (kept as fallback)
  */
 function say(text, voice = 'Polly.Joanna') {
   return `  <Say voice="${voice}">${escapeXml(text)}</Say>`;
+}
+
+/**
+ * <Play> a URL (used with ElevenLabs pre-generated audio)
+ */
+function play(url) {
+  return `  <Play>${url}</Play>`;
+}
+
+/**
+ * <Redirect> to an internal route
+ */
+function redirect(path) {
+  return `  <Redirect method="POST">${BASE_URL}${path}</Redirect>`;
 }
 
 /**
@@ -43,4 +57,4 @@ function escapeXml(str) {
     .replace(/'/g, '&apos;');
 }
 
-module.exports = { twiml, say, gather, hangup, escapeXml };
+module.exports = { twiml, say, play, redirect, gather, hangup, escapeXml };

@@ -1,24 +1,45 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const openai = require('../config/openai');
-const { twiml, say, gather, hangup } = require('../config/twiml');
+const { twiml, play, redirect, gather, hangup } = require('../config/twiml');
+const { generateSpeech } = require('../config/elevenlabs');
 const { SYSTEM_PROMPT_EN, SYSTEM_PROMPT_ES } = require('../prompts/systemPrompts');
 
 const BASE_URL = process.env.BASE_URL;
 
-// ─── In-memory call state ─────────────────────────────────────────────────────
-// Stores { lang, startTime, history[] } keyed by Twilio CallSid.
-// A production app would use Redis or a DB instead.
-const callSessions = new Map();
+// ─── Audio cache ──────────────────────────────────────────────────────────────
+const audioCache = new Map();
 
-const CALL_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+function storeAudio(buffer) {
+  const id = crypto.randomUUID();
+  audioCache.set(id, buffer);
+  setTimeout(() => audioCache.delete(id), 5 * 60 * 1000);
+  return `${BASE_URL}/audio/${id}`;
+}
+
+async function tts(text) {
+  const buffer = await generateSpeech(text);
+  return play(storeAudio(buffer));
+}
+
+router.get('/audio/:id', (req, res) => {
+  const buffer = audioCache.get(req.params.id);
+  if (!buffer) return res.sendStatus(404);
+  res.set('Content-Type', 'audio/mpeg');
+  res.send(buffer);
+});
+
+// ─── Call state ───────────────────────────────────────────────────────────────
+const callSessions = new Map();
+const CALL_TIMEOUT_MS = 3 * 60 * 1000;
 
 function getSession(callSid) {
   return callSessions.get(callSid);
 }
 
 function createSession(callSid) {
-  const session = { lang: null, startTime: Date.now(), history: [] };
+  const session = { lang: null, startTime: Date.now(), history: [], summaryPrinted: false };
   callSessions.set(callSid, session);
   return session;
 }
@@ -32,6 +53,9 @@ function cleanupSession(callSid) {
 }
 
 function printCallSummary(callSid, session) {
+  if (!session || session.summaryPrinted) return;
+  session.summaryPrinted = true;
+
   const durationSec = Math.round((Date.now() - session.startTime) / 1000);
   const min = Math.floor(durationSec / 60);
   const sec = durationSec % 60;
@@ -60,51 +84,16 @@ function printCallSummary(callSid, session) {
 }
 
 // ─── 1. Incoming call → IVR language selection ───────────────────────────────
-router.post('/incoming-call', (req, res) => {
+router.post('/incoming-call', async (req, res) => {
   const callSid = req.body?.CallSid;
   createSession(callSid);
 
-  res.type('text/xml');
-  res.send(twiml(
-    gather({
-      action: '/select-language',
-      input: 'dtmf',
-      timeout: 8,
-      numDigits: 1,
-      children: say(
-        'Gracias por llamar a The Secret Spot. ' +
-        'Para español, oprima 1. ' +
-        'For English, press 2.',
-        'Polly.Lupe'
-      )
-    }) +
-    '\n' +
-    // No input fallback → default to Spanish
-    say('No recibimos respuesta. ¡Hasta luego! We did not receive a response. Goodbye!', 'Polly.Lupe') +
-    '\n' +
-    hangup()
-  ));
-});
+  try {
+    const [promptAudio, fallbackAudio] = await Promise.all([
+      tts('Gracias por llamar a The Secret Spot. Para español, oprima 1. For English, press 2.'),
+      tts('No recibimos respuesta. ¡Hasta luego! We did not receive a response. Goodbye!'),
+    ]);
 
-// ─── 2. Language selected → greeting in chosen language ──────────────────────
-router.post('/select-language', (req, res) => {
-  const callSid = req.body?.CallSid;
-  const digit = req.body?.Digits;
-
-  const session = getSession(callSid) || createSession(callSid);
-
-  let lang, greetingText, voice;
-
-  if (digit === '1') {
-    lang = 'es';
-    voice = 'Polly.Lupe';
-    greetingText = '¡Hola! Bienvenido a The Secret Spot. ¿En qué le podemos ayudar hoy?';
-  } else if (digit === '2') {
-    lang = 'en';
-    voice = 'Polly.Joanna';
-    greetingText = 'Hi! Welcome to The Secret Spot. How can I help you today?';
-  } else {
-    // Invalid input – ask again
     res.type('text/xml');
     res.send(twiml(
       gather({
@@ -112,31 +101,83 @@ router.post('/select-language', (req, res) => {
         input: 'dtmf',
         timeout: 8,
         numDigits: 1,
-        children: say('Opción no válida. Para español oprima 1. For English press 2.', 'Polly.Lupe')
+        children: promptAudio,
       }) +
+      '\n' + fallbackAudio +
       '\n' + hangup()
     ));
+  } catch (err) {
+    console.error(`[${callSid}] ❌ TTS error on incoming-call:`, err.message);
+    res.type('text/xml');
+    res.send(twiml(hangup()));
+  }
+});
+
+// ─── 2. Language selected → greeting ─────────────────────────────────────────
+router.post('/select-language', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const digit = req.body?.Digits;
+  const session = getSession(callSid) || createSession(callSid);
+
+  let lang, greetingText;
+
+  if (digit === '1') {
+    lang = 'es';
+    greetingText = '¡Hola! Bienvenido a The Secret Spot. ¿En qué le podemos ayudar hoy?';
+  } else if (digit === '2') {
+    lang = 'en';
+    greetingText = 'Hi! Welcome to The Secret Spot. How can I help you today?';
+  } else {
+    try {
+      const invalidAudio = await tts('Opción no válida. Para español oprima 1. For English press 2.');
+      res.type('text/xml');
+      res.send(twiml(
+        gather({
+          action: '/select-language',
+          input: 'dtmf',
+          timeout: 8,
+          numDigits: 1,
+          children: invalidAudio,
+        }) +
+        '\n' + hangup()
+      ));
+    } catch (err) {
+      console.error(`[${callSid}] ❌ TTS error:`, err.message);
+      res.type('text/xml');
+      res.send(twiml(hangup()));
+    }
     return;
   }
 
   session.lang = lang;
+  const noResponseText = lang === 'es'
+    ? 'No escuchamos respuesta. ¡Hasta luego!'
+    : "We didn't hear a response. Goodbye!";
 
-  res.type('text/xml');
-  res.send(twiml(
-    gather({
-      action: '/ask-ai',
-      input: 'speech',
-      timeout: 5,
-      speechTimeout: 'auto',
-      language: lang === 'es' ? 'es-US' : 'en-US',
-      children: say(greetingText, voice)
-    }) +
-    '\n' +
-    // If caller doesn't respond to greeting
-    say(lang === 'es' ? 'No escuchamos respuesta. ¡Hasta luego!' : 'We didn\'t hear a response. Goodbye!', voice) +
-    '\n' +
-    hangup()
-  ));
+  try {
+    const [greetAudio, noResponseAudio] = await Promise.all([
+      tts(greetingText),
+      tts(noResponseText),
+    ]);
+
+    res.type('text/xml');
+    res.send(twiml(
+      gather({
+        action: '/ask-ai',
+        input: 'speech',
+        timeout: 5,
+        speechTimeout: 'auto',
+        language: lang === 'es' ? 'es-US' : 'en-US',
+        children: greetAudio,
+      }) +
+      '\n' + noResponseAudio +
+      '\n' + hangup()
+    ));
+  } catch (err) {
+    console.error(`[${callSid}] ❌ TTS error on select-language:`, err.message);
+    res.type('text/xml');
+    res.send(twiml(hangup()));
+  }
 });
 
 // ─── 3. Conversational AI loop ───────────────────────────────────────────────
@@ -145,48 +186,53 @@ router.post('/ask-ai', async (req, res) => {
   const userMessage = req.body?.SpeechResult || '';
 
   const session = getSession(callSid) || createSession(callSid);
-  const lang = session.lang || 'en';
-  const voice = lang === 'es' ? 'Polly.Lupe' : 'Polly.Joanna';
+  const lang = session.lang || 'es';
 
-  // ── 3-minute timeout check ──
   if (isExpired(session)) {
+    printCallSummary(callSid, session);
     cleanupSession(callSid);
     const byeMsg = lang === 'es'
       ? 'Hemos alcanzado el tiempo máximo de la llamada. ¡Gracias por llamar a The Secret Spot! ¡Hasta luego!'
       : 'We have reached the maximum call time. Thank you for calling The Secret Spot! Goodbye!';
-    res.type('text/xml');
-    res.send(twiml(say(byeMsg, voice) + '\n' + hangup()));
+    try {
+      const byeAudio = await tts(byeMsg);
+      res.type('text/xml');
+      res.send(twiml(byeAudio + '\n' + hangup()));
+    } catch {
+      res.type('text/xml');
+      res.send(twiml(hangup()));
+    }
     return;
   }
 
-  // ── If no speech detected, prompt again ──
   if (!userMessage.trim()) {
-    const listenMsg = lang === 'es' ? 'Lo siento, no le escuché. ¿En qué le puedo ayudar?' : 'Sorry, I didn\'t catch that. How can I help you?';
-    res.type('text/xml');
-    res.send(twiml(
-      gather({
-        action: '/ask-ai',
-        input: 'speech',
-        timeout: 6,
-        speechTimeout: 'auto',
-        language: lang === 'es' ? 'es-US' : 'en-US',
-        children: say(listenMsg, voice)
-      }) +
-      '\n' +
-      hangup()
-    ));
+    const listenMsg = lang === 'es'
+      ? 'Lo siento, no le escuché. ¿En qué le puedo ayudar?'
+      : "Sorry, I didn't catch that. How can I help you?";
+    try {
+      const listenAudio = await tts(listenMsg);
+      res.type('text/xml');
+      res.send(twiml(
+        gather({
+          action: '/ask-ai',
+          input: 'speech',
+          timeout: 6,
+          speechTimeout: 'auto',
+          language: lang === 'es' ? 'es-US' : 'en-US',
+          children: listenAudio,
+        }) +
+        '\n' + hangup()
+      ));
+    } catch {
+      res.type('text/xml');
+      res.send(twiml(hangup()));
+    }
     return;
   }
 
   console.log(`[${callSid}] 👤 (${lang}): ${userMessage}`);
-
-  // ── Append user turn to history ──
   session.history.push({ role: 'user', content: userMessage });
-
-  // Keep history to last 10 turns to avoid bloating the prompt
-  if (session.history.length > 20) {
-    session.history = session.history.slice(-20);
-  }
+  if (session.history.length > 20) session.history = session.history.slice(-20);
 
   try {
     const systemPrompt = lang === 'es' ? SYSTEM_PROMPT_ES : SYSTEM_PROMPT_EN;
@@ -200,63 +246,85 @@ router.post('/ask-ai', async (req, res) => {
       ],
     });
 
-    const aiReply = completion.choices[0]?.message?.content?.trim() || (
-      lang === 'es' ? '¿En qué más le puedo ayudar?' : 'How else can I help you?'
-    );
+    const aiReply = completion.choices[0]?.message?.content?.trim() ||
+      (lang === 'es' ? '¿En qué más le puedo ayudar?' : 'How else can I help you?');
 
     console.log(`[${callSid}] 🤖: ${aiReply}`);
-
-    // Append assistant turn to history
     session.history.push({ role: 'assistant', content: aiReply });
 
-    const continueMsg = lang === 'es' ? '¿Hay algo más en que le pueda ayudar?' : 'Is there anything else I can help you with?';
+    const continueMsg = lang === 'es'
+      ? '¿Hay algo más en que le pueda ayudar?'
+      : 'Is there anything else I can help you with?';
+
+    const [replyAudio, continueAudio] = await Promise.all([
+      tts(aiReply),
+      tts(continueMsg),
+    ]);
 
     res.type('text/xml');
     res.send(twiml(
-      // Say AI response first
-      say(aiReply, voice) +
+      replyAudio +
       '\n' +
-      // Then keep listening — conversation continues
       gather({
         action: '/ask-ai',
         input: 'speech',
         timeout: 6,
         speechTimeout: 'auto',
         language: lang === 'es' ? 'es-US' : 'en-US',
-        children: say(continueMsg, voice)
+        children: continueAudio,
       }) +
-      '\n' +
-      // Caller went silent after follow-up prompt
-      say(
-        lang === 'es'
-          ? '¡Gracias por llamar a The Secret Spot! ¡Que tenga un excelente día!'
-          : 'Thank you for calling The Secret Spot! Have a wonderful day!',
-        voice
-      ) +
-      '\n' +
-      hangup()
+      '\n' + redirect('/goodbye')
     ));
 
   } catch (error) {
-    console.error(`[${callSid}] ❌ OpenAI error:`, error.message);
-
+    console.error(`[${callSid}] ❌ Error:`, error.message);
     const errorMsg = lang === 'es'
       ? 'Estamos experimentando un problema técnico. Por favor llame de nuevo en unos momentos.'
       : 'We are experiencing a technical issue. Please call back in a moment.';
-
-    res.type('text/xml');
-    res.send(twiml(say(errorMsg, voice) + '\n' + hangup()));
+    try {
+      const errAudio = await tts(errorMsg);
+      res.type('text/xml');
+      res.send(twiml(errAudio + '\n' + hangup()));
+    } catch {
+      res.type('text/xml');
+      res.send(twiml(hangup()));
+    }
   }
 });
 
-// ─── 4. Twilio status callback (optional but useful for cleanup) ──────────────
+// ─── 4. Goodbye – prints summary + farewell ───────────────────────────────────
+router.post('/goodbye', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const session = getSession(callSid);
+  const lang = session?.lang || 'es';
+
+  printCallSummary(callSid, session);
+  if (session) cleanupSession(callSid);
+
+  const byeMsg = lang === 'es'
+    ? '¡Gracias por llamar a The Secret Spot! ¡Que tenga un excelente día!'
+    : 'Thank you for calling The Secret Spot! Have a wonderful day!';
+
+  try {
+    const byeAudio = await tts(byeMsg);
+    res.type('text/xml');
+    res.send(twiml(byeAudio + '\n' + hangup()));
+  } catch {
+    res.type('text/xml');
+    res.send(twiml(hangup()));
+  }
+});
+
+// ─── 5. Twilio status callback (fallback cleanup) ─────────────────────────────
 router.post('/call-status', (req, res) => {
   const callSid = req.body?.CallSid;
   const status = req.body?.CallStatus;
   if (['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(status)) {
     const session = getSession(callSid);
-    if (session) printCallSummary(callSid, session);
-    cleanupSession(callSid);
+    if (session) {
+      printCallSummary(callSid, session);
+      cleanupSession(callSid);
+    }
     console.log(`[${callSid}] 📴 Llamada terminada: ${status}`);
   }
   res.sendStatus(200);
