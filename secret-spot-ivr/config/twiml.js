@@ -46,6 +46,13 @@ function hangup() {
 }
 
 /**
+ * <Dial> to a phone number
+ */
+function dial(number) {
+  return `  <Dial>${number}</Dial>`;
+}
+
+/**
  * Escape XML special chars so AI responses don't break TwiML.
  */
 function escapeXml(str) {
@@ -57,4 +64,4 @@ function escapeXml(str) {
     .replace(/'/g, '&apos;');
 }
 
-module.exports = { twiml, say, play, redirect, gather, hangup, escapeXml };
+module.exports = { twiml, say, play, redirect, gather, hangup, dial, escapeXml };

@@ -2,11 +2,25 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const openai = require('../config/openai');
-const { twiml, play, redirect, gather, hangup } = require('../config/twiml');
+const { twiml, play, redirect, gather, hangup, dial } = require('../config/twiml');
 const { generateSpeech } = require('../config/elevenlabs');
 const { SYSTEM_PROMPT_EN, SYSTEM_PROMPT_ES } = require('../prompts/systemPrompts');
 
 const BASE_URL = process.env.BASE_URL;
+
+// ─── Staff transfer config ────────────────────────────────────────────────────
+const STAFF = [
+  {
+    name_es: 'Recepción / Estilistas',
+    name_en: 'Reception / Stylists',
+    number: process.env.TRANSFER_NUMBER || '+19392312803',
+  },
+  {
+    name_es: 'Gerencia',
+    name_en: 'Management',
+    number: process.env.TRANSFER_NUMBER || '+19392312803',
+  },
+];
 
 // ─── Audio cache ──────────────────────────────────────────────────────────────
 const audioCache = new Map();
@@ -333,12 +347,15 @@ router.post('/ask-ai', async (req, res) => {
     const rawReply  = completion.choices[0]?.message?.content?.trim() ||
       (lang === 'es' ? '¿En qué más le puedo ayudar?' : 'How else can I help you?');
 
-    const hasFin    = rawReply.includes('[FIN]');
-    const aiReply   = rawReply.replace(/\[FIN\]/g, '').trim();
+    const hasFin      = rawReply.includes('[FIN]');
+    const hasTransfer = rawReply.includes('[TRANSFER]');
+    const aiReply     = rawReply.replace(/\[FIN\]|\[TRANSFER\]/g, '').trim();
     // Safety guard: never hang up if the AI is still asking a question
-    const shouldEnd = hasFin && !aiReply.trimEnd().endsWith('?');
+    const shouldEnd      = hasFin && !aiReply.trimEnd().endsWith('?');
+    const shouldTransfer = hasTransfer && !aiReply.trimEnd().endsWith('?');
 
-    console.log(`[${callSid}] 🤖${shouldEnd ? ' [FIN]' : ''}: ${aiReply}`);
+    const marker = shouldEnd ? ' [FIN]' : shouldTransfer ? ' [TRANSFER]' : '';
+    console.log(`[${callSid}] 🤖${marker}: ${aiReply}`);
     session.history.push({ role: 'assistant', content: aiReply });
 
     // ── Caller said goodbye → hang up and generate summary ──
@@ -351,6 +368,14 @@ router.post('/ask-ai', async (req, res) => {
       generateCallSummary(callSid, snap).catch(err =>
         console.error(`[${callSid}] ❌ Summary error:`, err.message)
       );
+      return;
+    }
+
+    // ── Caller wants to speak to staff → transfer menu ──
+    if (shouldTransfer) {
+      const transitionAudio = await tts(aiReply, session);
+      res.type('text/xml');
+      res.send(twiml(transitionAudio + '\n' + redirect('/transfer-menu')));
       return;
     }
 
@@ -422,7 +447,72 @@ router.post('/goodbye', async (req, res) => {
   }
 });
 
-// ─── 5. Twilio status callback (fallback cleanup) ─────────────────────────────
+// ─── 5. Transfer menu ────────────────────────────────────────────────────────
+router.post('/transfer-menu', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const session = getSession(callSid);
+  const lang    = session?.lang || 'es';
+
+  const menuText = lang === 'es'
+    ? `Para hablar con ${STAFF[0].name_es}, oprima 1. Para hablar con ${STAFF[1].name_es}, oprima 2.`
+    : `To speak with ${STAFF[0].name_en}, press 1. To speak with ${STAFF[1].name_en}, press 2.`;
+
+  try {
+    const menuAudio = await tts(menuText);
+    res.type('text/xml');
+    res.send(twiml(
+      gather({
+        action: '/select-staff',
+        input: 'dtmf',
+        timeout: 8,
+        numDigits: 1,
+        children: menuAudio,
+      }) +
+      // No input → auto-dial option 1
+      '\n' + dial(STAFF[0].number)
+    ));
+  } catch (err) {
+    console.error(`[${callSid}] ❌ TTS error on transfer-menu:`, err.message);
+    res.type('text/xml');
+    res.send(twiml(dial(STAFF[0].number)));
+  }
+});
+
+// ─── 6. Staff selected → dial ─────────────────────────────────────────────────
+router.post('/select-staff', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const digit   = req.body?.Digits;
+  const session = getSession(callSid);
+  const lang    = session?.lang || 'es';
+
+  const index  = digit === '2' ? 1 : 0;
+  const staff  = STAFF[index];
+
+  const connectingText = lang === 'es'
+    ? 'Un momento por favor, le estamos conectando.'
+    : 'One moment please, connecting you now.';
+
+  console.log(`[${callSid}] 📲 Transferring to ${staff.name_es} (${staff.number})`);
+
+  try {
+    const connectingAudio = await tts(connectingText);
+    res.type('text/xml');
+    res.send(twiml(connectingAudio + '\n' + dial(staff.number)));
+  } catch {
+    res.type('text/xml');
+    res.send(twiml(dial(staff.number)));
+  }
+
+  if (session) {
+    const snap = snapshotSession(session);
+    cleanupSession(callSid);
+    generateCallSummary(callSid, snap).catch(err =>
+      console.error(`[${callSid}] ❌ Summary error:`, err.message)
+    );
+  }
+});
+
+// ─── 7. Twilio status callback (fallback cleanup) ─────────────────────────────
 router.post('/call-status', (req, res) => {
   const callSid = req.body?.CallSid;
   const status  = req.body?.CallStatus;
