@@ -18,8 +18,9 @@ function storeAudio(buffer) {
   return `${BASE_URL}/audio/${id}`;
 }
 
-async function tts(text) {
+async function tts(text, session) {
   const buffer = await generateSpeech(text);
+  if (session) session.elChars += text.length;
   return play(storeAudio(buffer));
 }
 
@@ -39,7 +40,15 @@ function getSession(callSid) {
 }
 
 function createSession(callSid) {
-  const session = { lang: null, startTime: Date.now(), history: [], summaryPrinted: false };
+  const session = {
+    lang: null,
+    startTime: Date.now(),
+    history: [],
+    summaryPrinted: false,
+    elChars: 0,
+    oaiTokens: { prompt: 0, completion: 0 },
+    sttTurns: 0,
+  };
   callSessions.set(callSid, session);
   return session;
 }
@@ -62,6 +71,18 @@ function printCallSummary(callSid, session) {
   const turns = Math.floor(session.history.length / 2);
   const lang = session.lang === 'es' ? 'Español' : 'English';
 
+  // ── Cost estimates ──
+  // ElevenLabs: eleven_multilingual_v2 ≈ $0.00033/char
+  const elCost   = session.elChars * 0.00033;
+  // OpenAI gpt-4o-mini: $0.15/1M input tokens, $0.60/1M output tokens
+  const oaiCost  = (session.oaiTokens.prompt * 0.15 + session.oaiTokens.completion * 0.60) / 1_000_000;
+  // Twilio: $0.0085/min inbound + $0.01 per <Gather speech> segment
+  const twilioMin  = Math.max(1, Math.ceil(durationSec / 60));
+  const twilioCost = twilioMin * 0.0085 + session.sttTurns * 0.01;
+  const total = elCost + oaiCost + twilioCost;
+
+  const fmt = (n) => `$${n.toFixed(4)}`;
+
   console.log('\n' + '═'.repeat(62));
   console.log('  📋  RESUMEN DE LLAMADA');
   console.log('═'.repeat(62));
@@ -69,6 +90,13 @@ function printCallSummary(callSid, session) {
   console.log(`  🌐  Idioma  : ${lang}`);
   console.log(`  ⏱   Duración: ${min}m ${sec}s`);
   console.log(`  💬  Turnos  : ${turns}`);
+  console.log('─'.repeat(62));
+  console.log('  💰  COSTO ESTIMADO (aproximado)');
+  console.log(`      ElevenLabs  ${String(session.elChars).padStart(6)} chars   → ${fmt(elCost)}`);
+  console.log(`      OpenAI      ${String(session.oaiTokens.prompt + session.oaiTokens.completion).padStart(6)} tokens  → ${fmt(oaiCost)}`);
+  console.log(`      Twilio      ${String(twilioMin).padStart(3)}min + ${session.sttTurns} STT      → ${fmt(twilioCost)}`);
+  console.log(`                                      ──────────`);
+  console.log(`      TOTAL                           ${fmt(total)}`);
   console.log('─'.repeat(62));
   if (session.history.length === 0) {
     console.log('  (sin conversación registrada)');
@@ -86,12 +114,12 @@ function printCallSummary(callSid, session) {
 // ─── 1. Incoming call → IVR language selection ───────────────────────────────
 router.post('/incoming-call', async (req, res) => {
   const callSid = req.body?.CallSid;
-  createSession(callSid);
+  const session = createSession(callSid);
 
   try {
     const [promptAudio, fallbackAudio] = await Promise.all([
-      tts('Gracias por llamar a The Secret Spot. Para español, oprima 1. For English, press 2.'),
-      tts('No recibimos respuesta. ¡Hasta luego! We did not receive a response. Goodbye!'),
+      tts('Gracias por llamar a The Secret Spot. Para español, oprima 1. For English, press 2.', session),
+      tts('No recibimos respuesta. ¡Hasta luego! We did not receive a response. Goodbye!', session),
     ]);
 
     res.type('text/xml');
@@ -129,7 +157,7 @@ router.post('/select-language', async (req, res) => {
     greetingText = 'Hi! Welcome to The Secret Spot. How can I help you today?';
   } else {
     try {
-      const invalidAudio = await tts('Opción no válida. Para español oprima 1. For English press 2.');
+      const invalidAudio = await tts('Opción no válida. Para español oprima 1. For English press 2.', session);
       res.type('text/xml');
       res.send(twiml(
         gather({
@@ -156,8 +184,8 @@ router.post('/select-language', async (req, res) => {
 
   try {
     const [greetAudio, noResponseAudio] = await Promise.all([
-      tts(greetingText),
-      tts(noResponseText),
+      tts(greetingText, session),
+      tts(noResponseText, session),
     ]);
 
     res.type('text/xml');
@@ -210,7 +238,7 @@ router.post('/ask-ai', async (req, res) => {
       ? 'Lo siento, no le escuché. ¿En qué le puedo ayudar?'
       : "Sorry, I didn't catch that. How can I help you?";
     try {
-      const listenAudio = await tts(listenMsg);
+      const listenAudio = await tts(listenMsg, session);
       res.type('text/xml');
       res.send(twiml(
         gather({
@@ -246,6 +274,12 @@ router.post('/ask-ai', async (req, res) => {
       ],
     });
 
+    if (completion.usage) {
+      session.oaiTokens.prompt     += completion.usage.prompt_tokens;
+      session.oaiTokens.completion += completion.usage.completion_tokens;
+    }
+    session.sttTurns++;
+
     const aiReply = completion.choices[0]?.message?.content?.trim() ||
       (lang === 'es' ? '¿En qué más le puedo ayudar?' : 'How else can I help you?');
 
@@ -257,8 +291,8 @@ router.post('/ask-ai', async (req, res) => {
       : 'Is there anything else I can help you with?';
 
     const [replyAudio, continueAudio] = await Promise.all([
-      tts(aiReply),
-      tts(continueMsg),
+      tts(aiReply, session),
+      tts(continueMsg, session),
     ]);
 
     res.type('text/xml');
@@ -282,7 +316,7 @@ router.post('/ask-ai', async (req, res) => {
       ? 'Estamos experimentando un problema técnico. Por favor llame de nuevo en unos momentos.'
       : 'We are experiencing a technical issue. Please call back in a moment.';
     try {
-      const errAudio = await tts(errorMsg);
+      const errAudio = await tts(errorMsg, session);
       res.type('text/xml');
       res.send(twiml(errAudio + '\n' + hangup()));
     } catch {
