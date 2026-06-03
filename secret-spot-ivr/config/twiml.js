@@ -18,9 +18,10 @@ function say(text, voice = 'Polly.Joanna') {
  * <Gather> that POSTs to an action route.
  * input can be "speech", "dtmf", or "speech dtmf"
  */
-function gather({ action, input = 'speech', timeout = 5, speechTimeout = 'auto', numDigits, children = '' }) {
+function gather({ action, input = 'speech', timeout = 5, speechTimeout = 'auto', numDigits, language, children = '' }) {
   const numDigitsAttr = numDigits ? ` numDigits="${numDigits}"` : '';
-  return `  <Gather input="${input}" action="${BASE_URL}${action}" method="POST" timeout="${timeout}" speechTimeout="${speechTimeout}"${numDigitsAttr}>\n${children}\n  </Gather>`;
+  const languageAttr = language ? ` language="${language}"` : '';
+  return `  <Gather input="${input}" action="${BASE_URL}${action}" method="POST" timeout="${timeout}" speechTimeout="${speechTimeout}"${numDigitsAttr}${languageAttr}>\n${children}\n  </Gather>`;
 }
 
 /**

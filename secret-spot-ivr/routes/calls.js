@@ -31,6 +31,34 @@ function cleanupSession(callSid) {
   callSessions.delete(callSid);
 }
 
+function printCallSummary(callSid, session) {
+  const durationSec = Math.round((Date.now() - session.startTime) / 1000);
+  const min = Math.floor(durationSec / 60);
+  const sec = durationSec % 60;
+  const turns = Math.floor(session.history.length / 2);
+  const lang = session.lang === 'es' ? 'Español' : 'English';
+
+  console.log('\n' + '═'.repeat(62));
+  console.log('  📋  RESUMEN DE LLAMADA');
+  console.log('═'.repeat(62));
+  console.log(`  📞  CallSid : ${callSid}`);
+  console.log(`  🌐  Idioma  : ${lang}`);
+  console.log(`  ⏱   Duración: ${min}m ${sec}s`);
+  console.log(`  💬  Turnos  : ${turns}`);
+  console.log('─'.repeat(62));
+  if (session.history.length === 0) {
+    console.log('  (sin conversación registrada)');
+  } else {
+    session.history.forEach(turn => {
+      const label = turn.role === 'user' ? '  👤 Cliente    ' : '  🤖 Asistente  ';
+      const lines = turn.content.split('\n');
+      console.log(`\n${label}: ${lines[0]}`);
+      lines.slice(1).forEach(l => console.log(`                  ${l}`));
+    });
+  }
+  console.log('\n' + '═'.repeat(62) + '\n');
+}
+
 // ─── 1. Incoming call → IVR language selection ───────────────────────────────
 router.post('/incoming-call', (req, res) => {
   const callSid = req.body?.CallSid;
@@ -44,15 +72,15 @@ router.post('/incoming-call', (req, res) => {
       timeout: 8,
       numDigits: 1,
       children: say(
-        'Thank you for calling The Secret Spot. ' +
-        'For English, press 1. ' +
-        'Para español, oprima 2.',
-        'Polly.Joanna'
+        'Gracias por llamar a The Secret Spot. ' +
+        'Para español, oprima 1. ' +
+        'For English, press 2.',
+        'Polly.Lupe'
       )
     }) +
     '\n' +
-    // No input fallback
-    say('We did not receive a response. Goodbye! No recibimos respuesta. ¡Hasta luego!', 'Polly.Joanna') +
+    // No input fallback → default to Spanish
+    say('No recibimos respuesta. ¡Hasta luego! We did not receive a response. Goodbye!', 'Polly.Lupe') +
     '\n' +
     hangup()
   ));
@@ -68,13 +96,13 @@ router.post('/select-language', (req, res) => {
   let lang, greetingText, voice;
 
   if (digit === '1') {
-    lang = 'en';
-    voice = 'Polly.Joanna';
-    greetingText = 'Hi! Welcome to The Secret Spot. How can I help you today?';
-  } else if (digit === '2') {
     lang = 'es';
     voice = 'Polly.Lupe';
     greetingText = '¡Hola! Bienvenido a The Secret Spot. ¿En qué le podemos ayudar hoy?';
+  } else if (digit === '2') {
+    lang = 'en';
+    voice = 'Polly.Joanna';
+    greetingText = 'Hi! Welcome to The Secret Spot. How can I help you today?';
   } else {
     // Invalid input – ask again
     res.type('text/xml');
@@ -84,7 +112,7 @@ router.post('/select-language', (req, res) => {
         input: 'dtmf',
         timeout: 8,
         numDigits: 1,
-        children: say('Invalid option. For English press 1. Para español oprima 2.', 'Polly.Joanna')
+        children: say('Opción no válida. Para español oprima 1. For English press 2.', 'Polly.Lupe')
       }) +
       '\n' + hangup()
     ));
@@ -100,6 +128,7 @@ router.post('/select-language', (req, res) => {
       input: 'speech',
       timeout: 5,
       speechTimeout: 'auto',
+      language: lang === 'es' ? 'es-US' : 'en-US',
       children: say(greetingText, voice)
     }) +
     '\n' +
@@ -140,6 +169,7 @@ router.post('/ask-ai', async (req, res) => {
         input: 'speech',
         timeout: 6,
         speechTimeout: 'auto',
+        language: lang === 'es' ? 'es-US' : 'en-US',
         children: say(listenMsg, voice)
       }) +
       '\n' +
@@ -192,6 +222,7 @@ router.post('/ask-ai', async (req, res) => {
         input: 'speech',
         timeout: 6,
         speechTimeout: 'auto',
+        language: lang === 'es' ? 'es-US' : 'en-US',
         children: say(continueMsg, voice)
       }) +
       '\n' +
@@ -223,8 +254,10 @@ router.post('/call-status', (req, res) => {
   const callSid = req.body?.CallSid;
   const status = req.body?.CallStatus;
   if (['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(status)) {
+    const session = getSession(callSid);
+    if (session) printCallSummary(callSid, session);
     cleanupSession(callSid);
-    console.log(`[${callSid}] 📴 Call ended: ${status}`);
+    console.log(`[${callSid}] 📴 Llamada terminada: ${status}`);
   }
   res.sendStatus(200);
 });
