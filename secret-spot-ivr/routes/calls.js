@@ -42,9 +42,10 @@ function getSession(callSid) {
 function createSession(callSid) {
   const session = {
     lang: null,
+    callerPhone: null,
     startTime: Date.now(),
     history: [],
-    summaryPrinted: false,
+    summaryDone: false,
     elChars: 0,
     oaiTokens: { prompt: 0, completion: 0 },
     sttTurns: 0,
@@ -61,53 +62,98 @@ function cleanupSession(callSid) {
   callSessions.delete(callSid);
 }
 
-function printCallSummary(callSid, session) {
-  if (!session || session.summaryPrinted) return;
-  session.summaryPrinted = true;
+function snapshotSession(session) {
+  return { ...session, history: session.history.map(t => ({ ...t })) };
+}
 
-  const durationSec = Math.round((Date.now() - session.startTime) / 1000);
+// ─── AI-generated call summary ────────────────────────────────────────────────
+async function generateCallSummary(callSid, snap) {
+  if (!snap || snap.summaryDone) return;
+  snap.summaryDone = true;
+
+  const durationSec = Math.round((Date.now() - snap.startTime) / 1000);
   const min = Math.floor(durationSec / 60);
   const sec = durationSec % 60;
-  const turns = Math.floor(session.history.length / 2);
-  const lang = session.lang === 'es' ? 'Español' : 'English';
+  const turns = Math.floor(snap.history.length / 2);
+  const langLabel = snap.lang === 'es' ? 'Español' : 'English';
 
-  // ── Cost estimates ──
-  // ElevenLabs: eleven_multilingual_v2 ≈ $0.00033/char
-  const elCost   = session.elChars * 0.00033;
-  // OpenAI gpt-4o-mini: $0.15/1M input tokens, $0.60/1M output tokens
-  const oaiCost  = (session.oaiTokens.prompt * 0.15 + session.oaiTokens.completion * 0.60) / 1_000_000;
-  // Twilio: $0.0085/min inbound + $0.01 per <Gather speech> segment
+  const elCost     = snap.elChars * 0.00033;
+  const oaiCost    = (snap.oaiTokens.prompt * 0.15 + snap.oaiTokens.completion * 0.60) / 1_000_000;
   const twilioMin  = Math.max(1, Math.ceil(durationSec / 60));
-  const twilioCost = twilioMin * 0.0085 + session.sttTurns * 0.01;
-  const total = elCost + oaiCost + twilioCost;
-
-  const fmt = (n) => `$${n.toFixed(4)}`;
+  const twilioCost = twilioMin * 0.0085 + snap.sttTurns * 0.01;
+  const total      = elCost + oaiCost + twilioCost;
+  const fmt        = (n) => `$${n.toFixed(4)}`;
 
   console.log('\n' + '═'.repeat(62));
   console.log('  📋  RESUMEN DE LLAMADA');
   console.log('═'.repeat(62));
   console.log(`  📞  CallSid : ${callSid}`);
-  console.log(`  🌐  Idioma  : ${lang}`);
+  console.log(`  📱  Caller  : ${snap.callerPhone || 'desconocido'}`);
+  console.log(`  🌐  Idioma  : ${langLabel}`);
   console.log(`  ⏱   Duración: ${min}m ${sec}s`);
   console.log(`  💬  Turnos  : ${turns}`);
   console.log('─'.repeat(62));
-  console.log('  💰  COSTO ESTIMADO (aproximado)');
-  console.log(`      ElevenLabs  ${String(session.elChars).padStart(6)} chars   → ${fmt(elCost)}`);
-  console.log(`      OpenAI      ${String(session.oaiTokens.prompt + session.oaiTokens.completion).padStart(6)} tokens  → ${fmt(oaiCost)}`);
-  console.log(`      Twilio      ${String(twilioMin).padStart(3)}min + ${session.sttTurns} STT      → ${fmt(twilioCost)}`);
+  console.log('  💰  COSTO ESTIMADO');
+  console.log(`      ElevenLabs  ${String(snap.elChars).padStart(6)} chars   → ${fmt(elCost)}`);
+  console.log(`      OpenAI      ${String(snap.oaiTokens.prompt + snap.oaiTokens.completion).padStart(6)} tokens  → ${fmt(oaiCost)}`);
+  console.log(`      Twilio      ${String(twilioMin).padStart(3)}min + ${snap.sttTurns} STT      → ${fmt(twilioCost)}`);
   console.log(`                                      ──────────`);
   console.log(`      TOTAL                           ${fmt(total)}`);
   console.log('─'.repeat(62));
-  if (session.history.length === 0) {
+
+  if (snap.history.length === 0) {
     console.log('  (sin conversación registrada)');
-  } else {
-    session.history.forEach(turn => {
-      const label = turn.role === 'user' ? '  👤 Cliente    ' : '  🤖 Asistente  ';
-      const lines = turn.content.split('\n');
-      console.log(`\n${label}: ${lines[0]}`);
-      lines.slice(1).forEach(l => console.log(`                  ${l}`));
-    });
+    console.log('═'.repeat(62) + '\n');
+    return;
   }
+
+  console.log('  🤖  Generando análisis con IA...\n');
+
+  try {
+    const transcript = snap.history
+      .map(t => `${t.role === 'user' ? 'Cliente' : 'Asistente'}: ${t.content}`)
+      .join('\n');
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 500,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content:
+`Eres un analista de llamadas para The Secret Spot – Ladies & Men Grooming Studio, Isabela, Puerto Rico.
+Analiza la transcripción y genera un JSON con los campos MÁS RELEVANTES para esta llamada específica.
+Incluye SOLO los campos que apliquen según la conversación:
+- caller_name: nombre si fue mencionado
+- phone_number: número si fue mencionado; si no, usa "${snap.callerPhone || ''}"
+- language: idioma de la llamada ("es" o "en")
+- reason_for_call: motivo principal en español
+- service_requested: servicio(s) de interés (string o array)
+- preferred_date: fecha preferida si mencionada
+- preferred_time: horario preferido si mencionado
+- new_client: true/false si se puede determinar
+- appointment_requested: true/false
+- urgency: "alta" | "normal" | "baja"
+- summary: resumen narrativo de 2-3 oraciones en español
+- action_required: true/false
+- follow_up_notes: notas para el equipo si aplica
+Responde SOLO con JSON válido. Sin markdown ni texto extra.`,
+        },
+        { role: 'user', content: `Transcripción:\n${transcript}` },
+      ],
+    });
+
+    const raw    = completion.choices[0]?.message?.content?.trim() || '{}';
+    const parsed = JSON.parse(raw);
+    if (!parsed.phone_number && snap.callerPhone) parsed.phone_number = snap.callerPhone;
+
+    console.log('  📊  ANÁLISIS:');
+    console.log(JSON.stringify(parsed, null, 2).split('\n').map(l => '  ' + l).join('\n'));
+  } catch (err) {
+    console.error('  ❌ Error generando análisis:', err.message);
+  }
+
   console.log('\n' + '═'.repeat(62) + '\n');
 }
 
@@ -115,6 +161,7 @@ function printCallSummary(callSid, session) {
 router.post('/incoming-call', async (req, res) => {
   const callSid = req.body?.CallSid;
   const session = createSession(callSid);
+  session.callerPhone = req.body?.From || null;
 
   try {
     const [promptAudio, fallbackAudio] = await Promise.all([
@@ -217,7 +264,7 @@ router.post('/ask-ai', async (req, res) => {
   const lang = session.lang || 'es';
 
   if (isExpired(session)) {
-    printCallSummary(callSid, session);
+    const snap = snapshotSession(session);
     cleanupSession(callSid);
     const byeMsg = lang === 'es'
       ? 'Hemos alcanzado el tiempo máximo de la llamada. ¡Gracias por llamar a The Secret Spot! ¡Hasta luego!'
@@ -230,6 +277,9 @@ router.post('/ask-ai', async (req, res) => {
       res.type('text/xml');
       res.send(twiml(hangup()));
     }
+    generateCallSummary(callSid, snap).catch(err =>
+      console.error(`[${callSid}] ❌ Summary error:`, err.message)
+    );
     return;
   }
 
@@ -267,7 +317,7 @@ router.post('/ask-ai', async (req, res) => {
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      max_tokens: 120,
+      max_tokens: 150,
       messages: [
         { role: 'system', content: systemPrompt },
         ...session.history,
@@ -280,11 +330,27 @@ router.post('/ask-ai', async (req, res) => {
     }
     session.sttTurns++;
 
-    const aiReply = completion.choices[0]?.message?.content?.trim() ||
+    const rawReply  = completion.choices[0]?.message?.content?.trim() ||
       (lang === 'es' ? '¿En qué más le puedo ayudar?' : 'How else can I help you?');
 
-    console.log(`[${callSid}] 🤖: ${aiReply}`);
+    const shouldEnd = rawReply.includes('[FIN]');
+    const aiReply   = rawReply.replace(/\[FIN\]/g, '').trim();
+
+    console.log(`[${callSid}] 🤖${shouldEnd ? ' [FIN]' : ''}: ${aiReply}`);
     session.history.push({ role: 'assistant', content: aiReply });
+
+    // ── Caller said goodbye → hang up and generate summary ──
+    if (shouldEnd) {
+      const finalAudio = await tts(aiReply, session);
+      const snap = snapshotSession(session);
+      cleanupSession(callSid);
+      res.type('text/xml');
+      res.send(twiml(finalAudio + '\n' + hangup()));
+      generateCallSummary(callSid, snap).catch(err =>
+        console.error(`[${callSid}] ❌ Summary error:`, err.message)
+      );
+      return;
+    }
 
     const continueMsg = lang === 'es'
       ? '¿Hay algo más en que le pueda ayudar?'
@@ -326,13 +392,12 @@ router.post('/ask-ai', async (req, res) => {
   }
 });
 
-// ─── 4. Goodbye – prints summary + farewell ───────────────────────────────────
+// ─── 4. Goodbye – farewell audio + summary ───────────────────────────────────
 router.post('/goodbye', async (req, res) => {
   const callSid = req.body?.CallSid;
   const session = getSession(callSid);
-  const lang = session?.lang || 'es';
-
-  printCallSummary(callSid, session);
+  const lang    = session?.lang || 'es';
+  const snap    = session ? snapshotSession(session) : null;
   if (session) cleanupSession(callSid);
 
   const byeMsg = lang === 'es'
@@ -347,17 +412,26 @@ router.post('/goodbye', async (req, res) => {
     res.type('text/xml');
     res.send(twiml(hangup()));
   }
+
+  if (snap) {
+    generateCallSummary(callSid, snap).catch(err =>
+      console.error(`[${callSid}] ❌ Summary error:`, err.message)
+    );
+  }
 });
 
 // ─── 5. Twilio status callback (fallback cleanup) ─────────────────────────────
 router.post('/call-status', (req, res) => {
   const callSid = req.body?.CallSid;
-  const status = req.body?.CallStatus;
+  const status  = req.body?.CallStatus;
   if (['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(status)) {
     const session = getSession(callSid);
     if (session) {
-      printCallSummary(callSid, session);
+      const snap = snapshotSession(session);
       cleanupSession(callSid);
+      generateCallSummary(callSid, snap).catch(err =>
+        console.error(`[${callSid}] ❌ Summary error:`, err.message)
+      );
     }
     console.log(`[${callSid}] 📴 Llamada terminada: ${status}`);
   }
