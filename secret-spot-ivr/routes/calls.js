@@ -333,8 +333,10 @@ router.post('/ask-ai', async (req, res) => {
     const rawReply  = completion.choices[0]?.message?.content?.trim() ||
       (lang === 'es' ? '¿En qué más le puedo ayudar?' : 'How else can I help you?');
 
-    const shouldEnd = rawReply.includes('[FIN]');
+    const hasFin    = rawReply.includes('[FIN]');
     const aiReply   = rawReply.replace(/\[FIN\]/g, '').trim();
+    // Safety guard: never hang up if the AI is still asking a question
+    const shouldEnd = hasFin && !aiReply.trimEnd().endsWith('?');
 
     console.log(`[${callSid}] 🤖${shouldEnd ? ' [FIN]' : ''}: ${aiReply}`);
     session.history.push({ role: 'assistant', content: aiReply });
