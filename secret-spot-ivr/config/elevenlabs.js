@@ -7,8 +7,9 @@ async function generateSpeech(text, lang = 'es') {
   const voice  = lang === 'en' ? VOICE_EN : VOICE_ES;
   const langCode = lang === 'en' ? 'en-US' : 'es-US';
 
+  const safe = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const ssml = `<speak version='1.0' xml:lang='${langCode}'>
-    <voice name='${voice}'>${text}</voice>
+    <voice name='${voice}'>${safe}</voice>
   </speak>`;
 
   const response = await fetch(
