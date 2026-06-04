@@ -1,16 +1,31 @@
-const openai = require('./openai');
+const VOICE_ES = process.env.GOOGLE_TTS_VOICE_ES || 'es-US-Neural2-B';
+const VOICE_EN = process.env.GOOGLE_TTS_VOICE_EN || 'en-US-Neural2-F';
 
-const VOICE = process.env.OPENAI_TTS_VOICE || 'nova';
+async function generateSpeech(text, lang = 'es') {
+  const apiKey = process.env.GOOGLE_TTS_API_KEY;
+  const voice  = lang === 'en' ? VOICE_EN : VOICE_ES;
+  const langCode = lang === 'en' ? 'en-US' : 'es-US';
 
-async function generateSpeech(text) {
-  const response = await openai.audio.speech.create({
-    model: 'tts-1',
-    voice: VOICE,
-    input: text,
-    response_format: 'mp3',
-  });
+  const response = await fetch(
+    `https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: { text },
+        voice: { languageCode: langCode, name: voice },
+        audioConfig: { audioEncoding: 'MP3' },
+      }),
+    }
+  );
 
-  return Buffer.from(await response.arrayBuffer());
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Google TTS ${response.status}: ${errText}`);
+  }
+
+  const { audioContent } = await response.json();
+  return Buffer.from(audioContent, 'base64');
 }
 
 module.exports = { generateSpeech };
