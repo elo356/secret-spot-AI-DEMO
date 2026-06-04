@@ -91,7 +91,7 @@ async function generateCallSummary(callSid, snap) {
   const turns = Math.floor(snap.history.length / 2);
   const langLabel = snap.lang === 'es' ? 'Español' : 'English';
 
-  const elCost     = snap.elChars * 0.00033;
+  const elCost     = snap.elChars * 0.000015; // OpenAI TTS-1: $15/1M chars
   const oaiCost    = (snap.oaiTokens.prompt * 0.15 + snap.oaiTokens.completion * 0.60) / 1_000_000;
   const twilioMin  = Math.max(1, Math.ceil(durationSec / 60));
   const twilioCost = twilioMin * 0.0085 + snap.sttTurns * 0.01;
@@ -108,7 +108,7 @@ async function generateCallSummary(callSid, snap) {
   console.log(`  💬  Turnos  : ${turns}`);
   console.log('─'.repeat(62));
   console.log('  💰  COSTO ESTIMADO');
-  console.log(`      ElevenLabs  ${String(snap.elChars).padStart(6)} chars   → ${fmt(elCost)}`);
+  console.log(`      OpenAI TTS  ${String(snap.elChars).padStart(6)} chars   → ${fmt(elCost)}`);
   console.log(`      OpenAI      ${String(snap.oaiTokens.prompt + snap.oaiTokens.completion).padStart(6)} tokens  → ${fmt(oaiCost)}`);
   console.log(`      Twilio      ${String(twilioMin).padStart(3)}min + ${snap.sttTurns} STT      → ${fmt(twilioCost)}`);
   console.log(`                                      ──────────`);
