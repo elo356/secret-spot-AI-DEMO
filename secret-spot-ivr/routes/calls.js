@@ -3,7 +3,8 @@ const router = express.Router();
 const crypto = require('crypto');
 const openai = require('../config/openai');
 const { twiml, play, redirect, gather, hangup, dial } = require('../config/twiml');
-const { generateSpeech } = require('../config/elevenlabs');
+const { generateSpeech: generateSpeechAzure }       = require('../config/elevenlabs');
+const { generateSpeech: generateSpeechElevenLabs } = require('../config/tts-elevenlabs');
 const { SYSTEM_PROMPT_EN, SYSTEM_PROMPT_ES } = require('../prompts/systemPrompts');
 
 const BASE_URL = process.env.BASE_URL;
@@ -33,7 +34,11 @@ function storeAudio(buffer) {
 }
 
 async function tts(text, session) {
-  const buffer = await generateSpeech(text, session?.lang || 'es');
+  const lang     = session?.lang || 'es';
+  const provider = session?.ttsProvider || 'azure';
+  const buffer   = provider === 'elevenlabs'
+    ? await generateSpeechElevenLabs(text)
+    : await generateSpeechAzure(text, lang);
   if (session) session.elChars += text.length;
   return play(storeAudio(buffer));
 }
@@ -63,6 +68,7 @@ function createSession(callSid) {
     elChars: 0,
     oaiTokens: { prompt: 0, completion: 0 },
     sttTurns: 0,
+    ttsProvider: 'azure',
   };
   callSessions.set(callSid, session);
   return session;
@@ -322,6 +328,13 @@ router.post('/ask-ai', async (req, res) => {
     return;
   }
 
+  const VOICE_TEST_KW = ['probar voces', 'prueba de voz', 'test voices', 'probar voz', 'voice test', 'escuchar voces', 'elegir voz', 'cambiar voz'];
+  if (VOICE_TEST_KW.some(kw => userMessage.toLowerCase().includes(kw))) {
+    res.type('text/xml');
+    res.send(twiml(redirect('/voice-test')));
+    return;
+  }
+
   console.log(`[${callSid}] 👤 (${lang}): ${userMessage}`);
   session.history.push({ role: 'user', content: userMessage });
   if (session.history.length > 20) session.history = session.history.slice(-20);
@@ -512,7 +525,89 @@ router.post('/select-staff', async (req, res) => {
   }
 });
 
-// ─── 7. Twilio status callback (fallback cleanup) ─────────────────────────────
+// ─── 7. Voice test ───────────────────────────────────────────────────────────
+router.post('/voice-test', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const session = getSession(callSid);
+  const lang    = session?.lang || 'es';
+
+  const sampleText = lang === 'es'
+    ? 'Hola, soy la asistente de The Secret Spot. ¿En qué le puedo ayudar hoy?'
+    : 'Hello, I am the assistant at The Secret Spot. How can I help you today?';
+
+  const introText = lang === 'es'
+    ? 'Escuchará dos opciones de voz. Presione 1 para la opción uno, presione 2 para la opción dos.'
+    : 'You will hear two voice options. Press 1 for option one, press 2 for option two.';
+  const label1 = lang === 'es' ? 'Opción uno.' : 'Option one.';
+  const label2 = lang === 'es' ? 'Opción dos.' : 'Option two.';
+
+  try {
+    const [introAudio, labelAudio1, sample1, labelAudio2, sample2] = await Promise.all([
+      generateSpeechAzure(introText, lang),
+      generateSpeechAzure(label1, lang),
+      generateSpeechElevenLabs(sampleText),
+      generateSpeechAzure(label2, lang),
+      generateSpeechAzure(sampleText, lang),
+    ]);
+
+    res.type('text/xml');
+    res.send(twiml(
+      play(storeAudio(introAudio)) +
+      '\n' + play(storeAudio(labelAudio1)) +
+      '\n' + play(storeAudio(sample1)) +
+      '\n' + play(storeAudio(labelAudio2)) +
+      '\n' +
+      gather({
+        action: '/voice-select',
+        input: 'dtmf',
+        timeout: 10,
+        numDigits: 1,
+        children: play(storeAudio(sample2)),
+      })
+    ));
+  } catch (err) {
+    console.error(`[${callSid}] ❌ Voice test error:`, err.message);
+    res.type('text/xml');
+    res.send(twiml(redirect('/ask-ai')));
+  }
+});
+
+router.post('/voice-select', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const digit   = req.body?.Digits;
+  const session = getSession(callSid);
+  const lang    = session?.lang || 'es';
+
+  if (session) {
+    session.ttsProvider = digit === '1' ? 'elevenlabs' : 'azure';
+  }
+
+  const confirmText = lang === 'es'
+    ? 'Perfecto, usaremos esa voz. ¿En qué le puedo ayudar?'
+    : 'Perfect, we will use that voice. How can I help you?';
+
+  try {
+    const confirmAudio = await tts(confirmText, session);
+    res.type('text/xml');
+    res.send(twiml(
+      gather({
+        action: '/ask-ai',
+        input: 'speech',
+        timeout: 5,
+        speechTimeout: 'auto',
+        language: lang === 'es' ? 'es-US' : 'en-US',
+        children: confirmAudio,
+      }) +
+      '\n' + redirect('/goodbye')
+    ));
+  } catch (err) {
+    console.error(`[${callSid}] ❌ Voice select error:`, err.message);
+    res.type('text/xml');
+    res.send(twiml(redirect('/ask-ai')));
+  }
+});
+
+// ─── 8. Twilio status callback (fallback cleanup) ─────────────────────────────
 router.post('/call-status', (req, res) => {
   const callSid = req.body?.CallSid;
   const status  = req.body?.CallStatus;
