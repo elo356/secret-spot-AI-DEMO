@@ -35,7 +35,7 @@ function storeAudio(buffer) {
 
 async function tts(text, session) {
   const lang     = session?.lang || 'es';
-  const provider = session?.ttsProvider || 'azure';
+  const provider = session?.ttsProvider || 'elevenlabs';
   const buffer   = provider === 'elevenlabs'
     ? await generateSpeechElevenLabs(text)
     : await generateSpeechAzure(text, lang);
@@ -68,7 +68,7 @@ function createSession(callSid) {
     elChars: 0,
     oaiTokens: { prompt: 0, completion: 0 },
     sttTurns: 0,
-    ttsProvider: 'azure',
+    ttsProvider: 'elevenlabs',
   };
   callSessions.set(callSid, session);
   return session;
@@ -541,13 +541,18 @@ router.post('/voice-test', async (req, res) => {
   const label1 = lang === 'es' ? 'Opción uno.' : 'Option one.';
   const label2 = lang === 'es' ? 'Opción dos.' : 'Option two.';
 
+  const chooseText = lang === 'es'
+    ? 'Diga voz uno o voz dos para elegir.'
+    : 'Say voice one or voice two to choose.';
+
   try {
-    const [introAudio, labelAudio1, sample1, labelAudio2, sample2] = await Promise.all([
+    const [introAudio, labelAudio1, sample1, labelAudio2, sample2, chooseAudio] = await Promise.all([
       generateSpeechAzure(introText, lang),
-      generateSpeechAzure(label1, lang),
+      generateSpeechElevenLabs(label1),
       generateSpeechElevenLabs(sampleText),
       generateSpeechAzure(label2, lang),
       generateSpeechAzure(sampleText, lang),
+      generateSpeechAzure(chooseText, lang),
     ]);
 
     res.type('text/xml');
@@ -556,13 +561,15 @@ router.post('/voice-test', async (req, res) => {
       '\n' + play(storeAudio(labelAudio1)) +
       '\n' + play(storeAudio(sample1)) +
       '\n' + play(storeAudio(labelAudio2)) +
+      '\n' + play(storeAudio(sample2)) +
       '\n' +
       gather({
         action: '/voice-select',
-        input: 'dtmf',
-        timeout: 10,
-        numDigits: 1,
-        children: play(storeAudio(sample2)),
+        input: 'speech',
+        timeout: 8,
+        speechTimeout: 'auto',
+        language: lang === 'es' ? 'es-US' : 'en-US',
+        children: play(storeAudio(chooseAudio)),
       })
     ));
   } catch (err) {
@@ -574,12 +581,13 @@ router.post('/voice-test', async (req, res) => {
 
 router.post('/voice-select', async (req, res) => {
   const callSid = req.body?.CallSid;
-  const digit   = req.body?.Digits;
+  const speech  = (req.body?.SpeechResult || '').toLowerCase();
   const session = getSession(callSid);
   const lang    = session?.lang || 'es';
 
+  const isOne = /uno|one|\bvoz 1\b|\bvoz one\b/.test(speech);
   if (session) {
-    session.ttsProvider = digit === '1' ? 'elevenlabs' : 'azure';
+    session.ttsProvider = isOne ? 'elevenlabs' : 'azure';
   }
 
   const confirmText = lang === 'es'
