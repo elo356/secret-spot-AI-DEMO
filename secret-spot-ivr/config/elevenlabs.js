@@ -1,8 +1,8 @@
 const VOICE_ES = process.env.AZURE_TTS_VOICE_ES || 'es-US-PalomaNeural';
 const VOICE_EN = process.env.AZURE_TTS_VOICE_EN || 'en-US-JennyNeural';
 const REQUEST_TIMEOUT_MS = parseInt(process.env.AZURE_TTS_TIMEOUT_MS || '20000', 10);
-const SPEECH_RATE = process.env.AZURE_TTS_RATE || '105%';
-const SPEECH_PITCH = process.env.AZURE_TTS_PITCH || '+2%';
+const SPEECH_RATE = process.env.AZURE_TTS_RATE || '85%';
+const SPEECH_PITCH = process.env.AZURE_TTS_PITCH || '-2%';
 
 async function generateSpeech(text, lang = 'es') {
   const key    = process.env.AZURE_TTS_KEY;
