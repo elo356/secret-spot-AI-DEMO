@@ -1,101 +1,83 @@
-# The Secret Spot – IVR Receptionist 📞
+# The Secret Spot IVR
 
-AI-powered phone receptionist for **The Secret Spot – Ladies & Men Grooming Studio**, Isabela PR.  
-Built with Node.js · Express · Twilio · OpenAI GPT-4o-mini.
+Production-ready bilingual phone receptionist for **The Secret Spot – Ladies & Men Grooming Studio** in Isabela, Puerto Rico.
 
----
+## What It Does
 
-## Features
+- Answers incoming calls in Spanish or English.
+- Uses **OpenAI** for the conversational flow.
+- Uses **Azure TTS only** for spoken responses.
+- Keeps replies short, fluid, and natural for phone audio.
+- Transfers callers to the correct area:
+  - Nails: `787-412-6940`
+  - Color / Cut / Blow Bar: `939-240-1685`
+  - Men's Area: `787-930-2891`
+  - Temporary Test Line: `939-231-2803`
+- Generates a summary for every finished call.
+- Saves summaries to `summaries/`.
+- Emails summaries when `EMAIL_*` variables are configured.
 
-- **IVR language selection** – press 1 for English, 2 for Spanish
-- **Bilingual AI** – responds fully in the selected language using the right Polly voice
-- **Persistent conversation** – remembers the full call history so context isn't lost between turns
-- **3-minute auto-hangup** – politely ends the call if it runs over 3 minutes
-- **No double-language responses** – the AI strictly speaks only the chosen language
+## Routes
 
----
-
-## Project Structure
-
-```
-secret-spot-ivr/
-├── index.js                   # App entry point
-├── package.json
-├── .env.example               # Copy to .env and fill in
-├── config/
-│   ├── openai.js              # OpenAI client
-│   └── twiml.js               # TwiML helper functions
-├── prompts/
-│   └── systemPrompts.js       # EN + ES system prompts
-└── routes/
-    └── calls.js               # All Twilio webhook routes
-```
-
----
+- `POST /incoming-call`
+- `POST /select-language`
+- `POST /ask-ai`
+- `POST /transfer-menu`
+- `POST /select-staff`
+- `POST /after-transfer`
+- `POST /transfer-timeout`
+- `POST /goodbye`
+- `POST /call-status`
+- `GET /audio/:id`
+- `GET /health`
 
 ## Setup
 
-### 1. Install dependencies
+1. Install dependencies:
+
 ```bash
 npm install
 ```
 
-### 2. Configure environment
+2. Create your environment file:
+
 ```bash
 cp .env.example .env
 ```
-Edit `.env`:
-```
-OPENAI_API_KEY=sk-...
-BASE_URL=https://your-ngrok-url.ngrok-free.app
-PORT=3000
-```
 
-### 3. Run the server
+3. Fill in:
+
+- `OPENAI_API_KEY`
+- `BASE_URL`
+- `AZURE_TTS_KEY`
+- `AZURE_TTS_REGION`
+- Optional email settings for summaries
+
+4. Run locally:
+
 ```bash
-# Development (auto-reload)
-npm run dev
-
-# Production
 npm start
 ```
 
-### 4. Expose with ngrok
+5. Expose the server publicly:
+
 ```bash
 ngrok http 3000
 ```
-Copy the HTTPS URL into your `.env` as `BASE_URL`.
 
----
+6. Put the public HTTPS URL into `BASE_URL`.
 
 ## Twilio Configuration
 
-In your Twilio phone number settings:
+Set your Twilio number webhooks to:
 
-| Event | URL |
-|-------|-----|
-| **A call comes in** | `POST https://your-url/incoming-call` |
-| **Call status callback** *(optional)* | `POST https://your-url/call-status` |
+- Incoming Call: `POST https://YOUR-BASE-URL/incoming-call`
+- Status Callback: `POST https://YOUR-BASE-URL/call-status`
 
----
+## Production Notes
 
-## Call Flow
-
-```
-Incoming call
-    └─► IVR: "Press 1 for English, oprima 2 para español"
-          ├─ 1 ─► English AI conversation loop
-          └─ 2 ─► Spanish AI conversation loop
-                       │
-                       ├─ Keeps listening after every response
-                       ├─ Remembers full conversation context
-                       └─ Auto-hangs up after 3 minutes
-```
-
----
-
-## Notes
-
-- Call sessions are stored **in memory**. If you restart the server mid-call, the language preference resets. For production, swap `callSessions` Map for Redis.
-- The `/call-status` route cleans up memory when calls end. Wire it in Twilio for best results.
-- `max_tokens: 120` keeps TTS responses short and natural. Increase if needed.
+- The app refuses to start if required Azure/OpenAI variables are missing.
+- If Azure TTS times out or fails, the app falls back to Twilio `<Say>` so the caller is not left hanging.
+- Failed transfers return the caller to the transfer menu instead of dropping the call.
+- If no transfer option is selected, the call defaults to the nails area.
+- Sessions are stored in memory. For a multi-server deployment, move sessions to Redis.

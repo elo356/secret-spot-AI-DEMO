@@ -8,14 +8,18 @@ function twiml(content) {
 }
 
 /**
- * <Say> with optional voice (kept as fallback)
+ * <Say> fallback if external TTS fails.
  */
-function say(text, voice = 'Polly.Joanna') {
-  return `  <Say voice="${voice}">${escapeXml(text)}</Say>`;
+function say(text, options = {}) {
+  const attrs = [];
+  if (options.voice) attrs.push(`voice="${options.voice}"`);
+  if (options.language) attrs.push(`language="${options.language}"`);
+  const attrString = attrs.length ? ` ${attrs.join(' ')}` : '';
+  return `  <Say${attrString}>${escapeXml(text)}</Say>`;
 }
 
 /**
- * <Play> a URL (used with ElevenLabs pre-generated audio)
+ * <Play> a URL for pre-generated audio
  */
 function play(url) {
   return `  <Play>${url}</Play>`;
@@ -46,10 +50,16 @@ function hangup() {
 }
 
 /**
- * <Dial> to a phone number
+ * <Dial> to a phone number.
  */
-function dial(number) {
-  return `  <Dial>${number}</Dial>`;
+function dial(number, options = {}) {
+  const attrs = [];
+  if (options.action) attrs.push(`action="${BASE_URL}${options.action}"`);
+  if (options.method) attrs.push(`method="${options.method}"`);
+  if (options.timeout) attrs.push(`timeout="${options.timeout}"`);
+  if (options.answerOnBridge) attrs.push(`answerOnBridge="${options.answerOnBridge}"`);
+  const attrString = attrs.length ? ` ${attrs.join(' ')}` : '';
+  return `  <Dial${attrString}>${escapeXml(number)}</Dial>`;
 }
 
 /**
