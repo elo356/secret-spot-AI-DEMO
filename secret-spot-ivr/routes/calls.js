@@ -176,6 +176,45 @@ function detectTransferSelection(req) {
   return -1;
 }
 
+function detectSpecificDepartment(text = '') {
+  const speech = String(text).toLowerCase();
+  if (!speech) return null;
+
+  if (/unas|uñas|nails|manicure|pedicure/.test(speech)) return STAFF[0];
+  if (/color|corte|blow|blow bar|mechas|salon|salón|styling/.test(speech)) return STAFF[1];
+  if (/caballeros|barber|barberia|barbería|hombres|mens|men's|beard|barba/.test(speech)) return STAFF[2];
+  if (/test|temporal|prueba/.test(speech)) return STAFF[3];
+  return null;
+}
+
+function isTransferIntent(text = '') {
+  return /transfer|transfier|transfiere|transfiera|comunica|comunicar|hablar con|speak with|connect me|department|departamento|area|área/.test(String(text).toLowerCase());
+}
+
+function isDepartmentIntent(req) {
+  const digit = req.body?.Digits;
+  if (digit === '1') return true;
+
+  const speech = String(req.body?.SpeechResult || '').toLowerCase();
+  return /\b1\b|departamento|department|transfer|transferir|comunicar|area|área/.test(speech);
+}
+
+function departmentDecisionPrompt(lang) {
+  if (lang === 'en') {
+    return 'If you would like to contact a department, press or say 1. If you need information or want to leave your details for a future appointment call back, press or say 2.';
+  }
+
+  return 'Si desea comunicarse con un departamento, oprima o diga 1. Si desea informacion o dejar sus datos para una llamada de cita, oprima o diga 2.';
+}
+
+function infoGreeting(lang) {
+  if (lang === 'en') {
+    return 'Perfect. How can I help you today?';
+  }
+
+  return 'Perfecto. Como le puedo ayudar hoy?';
+}
+
 function staffMenuText(lang) {
   if (lang === 'en') {
     return [
@@ -298,7 +337,10 @@ Si falta un dato, usa null, false, [] o "" según corresponda.`,
 
       const raw = completion.choices[0]?.message?.content?.trim() || '{}';
       const parsed = JSON.parse(raw);
-      if (!parsed.phone_number && snap.callerPhone) parsed.phone_number = snap.callerPhone;
+      if (snap.callerPhone) parsed.phone_number = snap.callerPhone;
+      if (parsed.appointment_data_collected && snap.callerPhone) {
+        parsed.appointment_data_collected.phone_number = snap.callerPhone;
+      }
       if (!parsed.transferred_to && snap.transferTarget) parsed.transferred_to = snap.transferTarget.name_es;
 
       analysisLines.push(
@@ -431,9 +473,7 @@ router.post('/select-language', async (req, res) => {
   }
 
   const lang = session.lang;
-  const greetingText = lang === 'en'
-    ? 'Hi, thank you for calling The Secret Spot. How can I help you today?'
-    : 'Hola, gracias por llamar a The Secret Spot. En que le puedo ayudar hoy?';
+  const greetingText = departmentDecisionPrompt(lang);
   const noResponseText = lang === 'en'
     ? "I didn't hear a response. Thank you for calling. Goodbye."
     : 'No escuche respuesta. Gracias por llamar. Hasta luego.';
@@ -447,11 +487,12 @@ router.post('/select-language', async (req, res) => {
     res.type('text/xml');
     res.send(twiml(
       gather({
-        action: '/ask-ai',
-        input: 'speech',
-        timeout: 5,
+        action: '/entry-choice',
+        input: 'speech dtmf',
+        timeout: 6,
         speechTimeout: 'auto',
         language: languageCode(lang),
+        numDigits: 1,
         children: greetingAudio,
       }) +
       '\n' + noResponseAudio +
@@ -464,11 +505,36 @@ router.post('/select-language', async (req, res) => {
   }
 });
 
+router.post('/entry-choice', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const session = getOrCreateSession(callSid);
+  const lang = session.lang || DEFAULT_LANGUAGE;
+
+  if (isDepartmentIntent(req)) {
+    res.type('text/xml');
+    res.send(twiml(redirect('/transfer-menu')));
+    return;
+  }
+
+  const replyAudio = await tts(infoGreeting(lang), session);
+  res.type('text/xml');
+  res.send(buildGatherResponse({
+    action: '/ask-ai',
+    prompt: replyAudio,
+    session,
+    input: 'speech',
+    timeout: 6,
+    speechTimeout: 'auto',
+    language: languageCode(lang),
+  }));
+});
+
 router.post('/ask-ai', async (req, res) => {
   const callSid = req.body?.CallSid;
   const session = getOrCreateSession(callSid);
   const lang = session.lang || DEFAULT_LANGUAGE;
   const userMessage = String(req.body?.SpeechResult || '').trim();
+  const directDepartment = detectSpecificDepartment(userMessage);
 
   if (isExpired(session)) {
     const snap = finalizeSession(callSid);
@@ -502,6 +568,27 @@ router.post('/ask-ai', async (req, res) => {
 
   console.log(`[${callSid}] 👤 (${lang}): ${userMessage}`);
   appendHistory(session, 'user', userMessage);
+
+  if (directDepartment && isTransferIntent(userMessage)) {
+    session.transferTarget = directDepartment;
+    const connectingText = lang === 'en'
+      ? `Of course. Connecting you with ${directDepartment.name_en}.`
+      : `Claro. Le conecto con ${directDepartment.name_es}.`;
+    appendHistory(session, 'assistant', connectingText);
+    const connectingAudio = await tts(connectingText, session);
+    res.type('text/xml');
+    res.send(twiml(
+      connectingAudio +
+      '\n' +
+      dial(directDepartment.number, {
+        action: '/after-transfer',
+        method: 'POST',
+        timeout: TRANSFER_TIMEOUT_SECONDS,
+        answerOnBridge: 'true',
+      })
+    ));
+    return;
+  }
 
   try {
     const completion = await openai.chat.completions.create({
