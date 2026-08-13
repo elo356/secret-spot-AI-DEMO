@@ -51,6 +51,11 @@ cp .env.example .env
 - `BASE_URL`
 - `AZURE_TTS_KEY`
 - `AZURE_TTS_REGION`
+- Optional TTS tuning:
+  - `AZURE_TTS_VOICE_ES` (default: `es-PR-AnaNeural`)
+  - `AZURE_TTS_VOICE_EN` (default: `en-US-AriaNeural`)
+  - `AZURE_TTS_RATE` (default: `105%`)
+  - `AZURE_TTS_PITCH` (default: `+2%`)
 - Optional email settings for summaries
 
 4. Run locally:

@@ -138,7 +138,7 @@ async function tts(text, session) {
   });
 }
 
-function buildGatherResponse({ action, prompt, session, input = 'speech', timeout = 6, speechTimeout = 'auto', numDigits, language, fallbackPath = '/goodbye' }) {
+function buildGatherResponse({ action, prompt, session, input = 'speech', timeout = 6, speechTimeout = 'auto', numDigits, language, fallbackPath = '/quiet-check' }) {
   return twiml(
     gather({
       action,
@@ -205,6 +205,14 @@ function departmentDecisionPrompt(lang) {
   }
 
   return 'Si desea comunicarse con un departamento, oprima o diga 1. Si desea informacion o dejar sus datos para una llamada de cita, oprima o diga 2.';
+}
+
+function quietFollowUpPrompt(lang) {
+  if (lang === 'en') {
+    return 'I did not hear a response. Are you still there? How can I help you today?';
+  }
+
+  return 'No escuché respuesta. ¿Sigue ahí? ¿En qué le puedo ayudar hoy?';
 }
 
 function infoGreeting(lang) {
@@ -425,7 +433,7 @@ router.post('/incoming-call', async (req, res) => {
   try {
     const [promptAudio, noResponseAudio] = await Promise.all([
       tts('Gracias por llamar a The Secret Spot. Para espanol, oprima 1. For English, press 2.', session),
-      tts('No recibimos respuesta. Gracias por llamar. Goodbye.', session),
+      tts('No recibimos respuesta. ¿Sigue ahí? Para espanol, oprima 1. For English, press 2.', session),
     ]);
 
     res.type('text/xml');
@@ -475,8 +483,8 @@ router.post('/select-language', async (req, res) => {
   const lang = session.lang;
   const greetingText = departmentDecisionPrompt(lang);
   const noResponseText = lang === 'en'
-    ? "I didn't hear a response. Thank you for calling. Goodbye."
-    : 'No escuche respuesta. Gracias por llamar. Hasta luego.';
+    ? "I didn't hear a response. Are you still there? Press 1 for Spanish or 2 for English."
+    : 'No escuché respuesta. ¿Sigue ahí? Para español, oprima 1. For English, press 2.';
 
   try {
     const [greetingAudio, noResponseAudio] = await Promise.all([
@@ -656,6 +664,27 @@ router.post('/ask-ai', async (req, res) => {
     res.send(twiml(errorAudio + '\n' + hangup()));
     await sendSummary(callSid, snap);
   }
+});
+
+router.post('/quiet-check', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const session = getOrCreateSession(callSid);
+  const lang = session?.lang || DEFAULT_LANGUAGE;
+  const promptText = quietFollowUpPrompt(lang);
+  const promptAudio = await tts(promptText, session);
+
+  res.type('text/xml');
+  res.send(twiml(
+    gather({
+      action: '/ask-ai',
+      input: 'speech',
+      timeout: 6,
+      speechTimeout: 'auto',
+      language: languageCode(lang),
+      children: promptAudio,
+    }) +
+    '\n' + redirect('/goodbye')
+  ));
 });
 
 router.post('/goodbye', async (req, res) => {
