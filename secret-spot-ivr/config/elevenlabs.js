@@ -1,6 +1,6 @@
-const VOICE_ES = process.env.AZURE_TTS_VOICE_ES || 'es-PR-AnaNeural';
-const VOICE_EN = process.env.AZURE_TTS_VOICE_EN || 'en-US-AriaNeural';
-const REQUEST_TIMEOUT_MS = parseInt(process.env.AZURE_TTS_TIMEOUT_MS || '15000', 10);
+const VOICE_ES = process.env.AZURE_TTS_VOICE_ES || 'es-US-PalomaNeural';
+const VOICE_EN = process.env.AZURE_TTS_VOICE_EN || 'en-US-JennyNeural';
+const REQUEST_TIMEOUT_MS = parseInt(process.env.AZURE_TTS_TIMEOUT_MS || '20000', 10);
 const SPEECH_RATE = process.env.AZURE_TTS_RATE || '105%';
 const SPEECH_PITCH = process.env.AZURE_TTS_PITCH || '+2%';
 
@@ -8,7 +8,7 @@ async function generateSpeech(text, lang = 'es') {
   const key    = process.env.AZURE_TTS_KEY;
   const region = process.env.AZURE_TTS_REGION;
   const voice  = lang === 'en' ? VOICE_EN : VOICE_ES;
-  const langCode = lang === 'en' ? 'en-US' : 'es-PR';
+  const langCode = lang === 'en' ? 'en-US' : 'es-US';
 
   if (!key || !region) {
     throw new Error('Azure TTS is not configured. Missing AZURE_TTS_KEY or AZURE_TTS_REGION.');
@@ -41,7 +41,9 @@ async function generateSpeech(text, lang = 'es') {
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`Azure TTS ${response.status}: ${errText}`);
+      const detail = errText ? errText.trim() : 'No response body returned by Azure';
+      console.error(`[Azure TTS] ${response.status} for voice=${voice} locale=${langCode}: ${detail}`);
+      throw new Error(`Azure TTS ${response.status}: ${detail}`);
     }
 
     return Buffer.from(await response.arrayBuffer());
